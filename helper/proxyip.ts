@@ -72,7 +72,6 @@ async function checkProxy(proxyAddress: string, proxyPort: number): Promise<Prox
 }
 
 (async () => {
-  const start = new Date().getTime();
   const proxyList = await readProxyList();
   const proxyChecked: string[] = [];
   const uniqueRawProxies: string[] = [];
@@ -80,7 +79,6 @@ async function checkProxy(proxyAddress: string, proxyPort: number): Promise<Prox
   const kvPair: any = {};
 
   let proxySaved = 0;
-  let finish = new Date().getTime();
 
   for (const proxy of proxyList) {
     const proxyKey = `${proxy.address}:${proxy.port}`;
@@ -110,22 +108,31 @@ async function checkProxy(proxyAddress: string, proxyPort: number): Promise<Prox
       })
       .finally(() => {
         CHECK_QUEUE.pop();
-        finish = new Date().getTime();
       });
 
-    while (CHECK_QUEUE.length) {
-      if (CHECK_QUEUE.length >= CONCURRENCY) {
-        await Bun.sleep(10);
-      } else {
-        break;
-      }
+    while (CHECK_QUEUE.length >= CONCURRENCY) {
+      await Bun.sleep(1);
     }
   }
 
-  await Bun.sleep(5000);
+  // Waiting for all process to be completed
+  while (CHECK_QUEUE.length) {
+    await Bun.sleep(1);
+  }
+
+  uniqueRawProxies.sort(sortByCountry);
+  activeProxyList.sort(sortByCountry);
+
   Bun.write(KV_PAIR_PROXY_FILE, JSON.stringify(kvPair, null, "  "));
   Bun.write(RAW_PROXY_LIST_FILE, uniqueRawProxies.join("\n"));
   Bun.write(PROXY_LIST_FILE, activeProxyList.join("\n"));
 
-  console.log(`Waktu proses: ${((finish - start) / 1000).toFixed(2)} detik`);
+  console.log(`Waktu proses: ${(Bun.nanoseconds() / 1000000000).toFixed(2)} detik`);
 })();
+
+function sortByCountry(a: string, b: string) {
+  a = a.split(",")[2];
+  b = b.split(",")[2];
+
+  return a.localeCompare(b);
+}
