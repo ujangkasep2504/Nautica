@@ -12,7 +12,17 @@ let proxyIP = "";
 let cachedProxyList = [];
 
 // Constant
-const PROXY_HEALTH_CHECK_API = "https://p01--boiling-frame--kw6dd7bjv2nr.code.run/check";
+const APP_DOMAIN = `${serviceName}.${rootDomain}`;
+const PORTS = [443, 80];
+const PROTOCOLS = ["trojan", "vless", "ss"];
+const KV_PROXY_URL = "https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/kvProxyList.json";
+const PROXY_BANK_URL = "https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/proxyList.txt";
+const DNS_SERVER_ADDRESS = "1.1.1.1";
+const DNS_SERVER_PORT = 53;
+const PROXY_HEALTH_CHECK_API = "https://id1.foolvpn.me/api/v1/check";
+const CONVERTER_URL =
+  "https://script.google.com/macros/s/AKfycbwwVeHNUlnP92syOP82p1dOk_-xwBgRIxkTjLhxxZ5UXicrGOEVNc5JaSOu0Bgsx_gG/exec";
+const DONATE_LINK = "https://trakteer.id/dickymuliafiqri/tip";
 const PROXY_PER_PAGE = 24;
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
@@ -22,7 +32,20 @@ const CORS_HEADER_OPTIONS = {
   "Access-Control-Max-Age": "86400",
 };
 
-async function getProxyList(proxyBankUrl) {
+async function getKVProxyList(kvProxyUrl = KV_PROXY_URL) {
+  if (!kvProxyUrl) {
+    throw new Error("No KV Proxy URL Provided!");
+  }
+
+  const kvProxy = await fetch(kvProxyUrl);
+  if (kvProxy.status == 200) {
+    return await kvProxy.json();
+  } else {
+    return {};
+  }
+}
+
+async function getProxyList(proxyBankUrl = PROXY_BANK_URL) {
   /**
    * Format:
    *
@@ -55,12 +78,13 @@ async function getProxyList(proxyBankUrl) {
   return cachedProxyList;
 }
 
-async function reverseProxy(request, target) {
+async function reverseProxy(request, target, targetPath) {
   const targetUrl = new URL(request.url);
   const targetChunk = target.split(":");
 
   targetUrl.hostname = targetChunk[0];
-  targetUrl.port = targetChunk.toString() || "443";
+  targetUrl.port = targetChunk[1]?.toString() || "443";
+  targetUrl.pathname = targetPath || targetUrl.pathname;
 
   const modifiedRequest = new Request(targetUrl, request);
 
@@ -82,8 +106,6 @@ function getAllConfig(request, hostName, proxyList, page = 0) {
 
   try {
     const uuid = crypto.randomUUID();
-    const ports = [443, 80];
-    const protocols = ["trojan", "vless", "ss"];
 
     // Build URI
     const uri = new URL(`trojan://${hostName}`);
@@ -104,12 +126,12 @@ function getAllConfig(request, hostName, proxyList, page = 0) {
       const { proxyIP, proxyPort, country, org } = proxy;
 
       uri.searchParams.set("path", `/${proxyIP}-${proxyPort}`);
-      uri.hash = `${country} ${org}`;
 
       const proxies = [];
-      for (const port of ports) {
+      for (const port of PORTS) {
         uri.port = port.toString();
-        for (const protocol of protocols) {
+        uri.hash = `${i + 1} ${getFlagEmoji(country)} ${org} WS ${port == 443 ? "TLS" : "NTLS"} [${serviceName}]`;
+        for (const protocol of PROTOCOLS) {
           // Special exceptions
           if (protocol === "ss") {
             uri.username = btoa(`none:${uuid}`);
@@ -161,9 +183,26 @@ export default {
       if (upgradeHeader === "websocket") {
         const proxyMatch = url.pathname.match(/^\/(.+[:=-]\d+)$/);
 
-        if (proxyMatch) {
+        if (url.pathname.length == 3 || url.pathname.match(",")) {
+          // Contoh: /ID, /SG, dll
+          const proxyKeys = url.pathname.replace("/", "").toUpperCase().split(",");
+          const proxyKey = proxyKeys[Math.floor(Math.random() * proxyKeys.length)];
+          let kvProxy = await env.nautica.get("kvProxy");
+          if (kvProxy) {
+            kvProxy = JSON.parse(kvProxy);
+          } else {
+            kvProxy = await getKVProxyList();
+            env.nautica.put("kvProxy", JSON.stringify(kvProxy), {
+              expirationTtl: 3600,
+            });
+          }
+
+          proxyIP = kvProxy[proxyKey][Math.floor(Math.random() * kvProxy[proxyKey].length)];
+
+          return await websocketHandler(request);
+        } else if (proxyMatch) {
           proxyIP = proxyMatch[1];
-          return await websockerHandler(request);
+          return await websocketHandler(request);
         }
       }
 
@@ -191,8 +230,7 @@ export default {
         });
       } else if (url.pathname.startsWith("/check")) {
         const target = url.searchParams.get("target").split(":");
-        const tls = url.searchParams.get("tls");
-        const result = await checkProxyHealth(target[0], target[1] || "443", tls);
+        const result = await checkProxyHealth(target[0], target[1] || "443");
 
         return new Response(JSON.stringify(result), {
           status: 200,
@@ -204,13 +242,13 @@ export default {
       } else if (url.pathname.startsWith("/api/v1")) {
         const apiPath = url.pathname.replace("/api/v1", "");
 
-        if (!isApiReady) {
-          return new Response("Api not ready", {
-            status: 500,
-          });
-        }
-
         if (apiPath.startsWith("/domains")) {
+          if (!isApiReady) {
+            return new Response("Api not ready", {
+              status: 500,
+            });
+          }
+
           const wildcardApiPath = apiPath.replace("/domains", "");
           const cloudflareApi = new CloudflareApi();
 
@@ -232,6 +270,112 @@ export default {
               },
             });
           }
+        } else if (apiPath.startsWith("/sub")) {
+          const filterCC = url.searchParams.get("cc")?.split(",") || [];
+          const filterPort = url.searchParams.get("port")?.split(",") || PORTS;
+          const filterVPN = url.searchParams.get("vpn")?.split(",") || PROTOCOLS;
+          const filterLimit = parseInt(url.searchParams.get("limit")) || 10;
+          const filterFormat = url.searchParams.get("format") || "raw";
+          const fillerDomain = url.searchParams.get("domain") || APP_DOMAIN;
+
+          const proxyBankUrl = url.searchParams.get("proxy-list") || env.PROXY_BANK_URL;
+          const proxyList = await getProxyList(proxyBankUrl)
+            .then((proxies) => {
+              // Filter CC
+              if (filterCC.length) {
+                return proxies.filter((proxy) => filterCC.includes(proxy.country));
+              }
+              return proxies;
+            })
+            .then((proxies) => {
+              // shuffle result
+              shuffleArray(proxies);
+              return proxies;
+            });
+
+          const uuid = crypto.randomUUID();
+          const result = [];
+          for (const proxy of proxyList) {
+            const uri = new URL(`trojan://${fillerDomain}`);
+            uri.searchParams.set("encryption", "none");
+            uri.searchParams.set("type", "ws");
+            uri.searchParams.set("host", APP_DOMAIN);
+
+            for (const port of filterPort) {
+              for (const protocol of filterVPN) {
+                if (result.length >= filterLimit) break;
+
+                uri.protocol = protocol;
+                uri.port = port.toString();
+                if (protocol == "ss") {
+                  uri.username = btoa(`none:${uuid}`);
+                } else {
+                  uri.username = uuid;
+                }
+
+                uri.searchParams.set("security", port == 443 ? "tls" : "none");
+                uri.searchParams.set("sni", port == 80 && protocol == "vless" ? "" : APP_DOMAIN);
+                uri.searchParams.set("path", `/${proxy.proxyIP}-${proxy.proxyPort}`);
+
+                uri.hash = `${result.length + 1} ${getFlagEmoji(proxy.country)} ${proxy.org} WS ${
+                  port == 443 ? "TLS" : "NTLS"
+                } [${serviceName}]`;
+                result.push(uri.toString());
+              }
+            }
+          }
+
+          let finalResult = "";
+          switch (filterFormat) {
+            case "raw":
+              finalResult = result.join("\n");
+              break;
+            case "clash":
+            case "sfa":
+            case "bfr":
+            case "v2ray":
+              const encodedResult = [];
+              for (const proxy of result) {
+                encodedResult.push(encodeURIComponent(proxy));
+              }
+
+              // finalResult = `${CONVERTER_URL}?target=${filterFormat}&url=${encodedResult.join(",")}`;
+              const res = await fetch(`${CONVERTER_URL}?target=${filterFormat}&url=${encodedResult.join(",")}`);
+              if (res.status == 200) {
+                finalResult = await res.text();
+              } else {
+                return new Response(res.statusText, {
+                  status: res.status,
+                  headers: {
+                    ...CORS_HEADER_OPTIONS,
+                  },
+                });
+              }
+              break;
+          }
+
+          return new Response(finalResult, {
+            status: 200,
+            headers: {
+              ...CORS_HEADER_OPTIONS,
+            },
+          });
+        } else if (apiPath.startsWith("/myip")) {
+          return new Response(
+            JSON.stringify({
+              ip:
+                request.headers.get("cf-connecting-ipv6") ||
+                request.headers.get("cf-connecting-ip") ||
+                request.headers.get("x-real-ip"),
+              colo: request.headers.get("cf-ray")?.split("-")[1],
+              ...request.cf,
+            }),
+            {
+              headers: {
+                ...CORS_HEADER_OPTIONS,
+              },
+            }
+          );
         }
       }
 
@@ -248,7 +392,7 @@ export default {
   },
 };
 
-async function websockerHandler(request) {
+async function websocketHandler(request) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
 
@@ -266,15 +410,14 @@ async function websockerHandler(request) {
   let remoteSocketWrapper = {
     value: null,
   };
-  let udpStreamWrite = null;
   let isDNS = false;
 
   readableWebSocketStream
     .pipeTo(
       new WritableStream({
         async write(chunk, controller) {
-          if (isDNS && udpStreamWrite) {
-            return udpStreamWrite(chunk);
+          if (isDNS) {
+            return handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, null, log);
           }
           if (remoteSocketWrapper.value) {
             const writer = remoteSocketWrapper.value.writable.getWriter();
@@ -308,15 +451,20 @@ async function websockerHandler(request) {
             if (protocolHeader.portRemote === 53) {
               isDNS = true;
             } else {
+              // return handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk, webSocket, protocolHeader.version, log);
               throw new Error("UDP only support for DNS port 53");
             }
           }
 
           if (isDNS) {
-            const { write } = await handleUDPOutbound(webSocket, protocolHeader.version, log);
-            udpStreamWrite = write;
-            udpStreamWrite(protocolHeader.rawClientData);
-            return;
+            return handleUDPOutbound(
+              DNS_SERVER_ADDRESS,
+              DNS_SERVER_PORT,
+              chunk,
+              webSocket,
+              protocolHeader.version,
+              log
+            );
           }
 
           handleTCPOutBound(
@@ -411,58 +559,43 @@ async function handleTCPOutBound(
   remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
 }
 
-async function handleUDPOutbound(webSocket, responseHeader, log) {
-  let isVlessHeaderSent = false;
-  const transformStream = new TransformStream({
-    start(controller) {},
-    transform(chunk, controller) {
-      for (let index = 0; index < chunk.byteLength; ) {
-        const lengthBuffer = chunk.slice(index, index + 2);
-        const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
-        const udpData = new Uint8Array(chunk.slice(index + 2, index + 2 + udpPakcetLength));
-        index = index + 2 + udpPakcetLength;
-        controller.enqueue(udpData);
-      }
-    },
-    flush(controller) {},
-  });
-  transformStream.readable
-    .pipeTo(
+async function handleUDPOutbound(targetAddress, targetPort, udpChunk, webSocket, responseHeader, log) {
+  try {
+    let protocolHeader = responseHeader;
+    const tcpSocket = connect({
+      hostname: targetAddress,
+      port: targetPort,
+    });
+
+    log(`Connected to ${targetAddress}:${targetPort}`);
+
+    const writer = tcpSocket.writable.getWriter();
+    await writer.write(udpChunk);
+    writer.releaseLock();
+
+    await tcpSocket.readable.pipeTo(
       new WritableStream({
         async write(chunk) {
-          const resp = await fetch("https://1.1.1.1/dns-query", {
-            method: "POST",
-            headers: {
-              "content-type": "application/dns-message",
-            },
-            body: chunk,
-          });
-          const dnsQueryResult = await resp.arrayBuffer();
-          const udpSize = dnsQueryResult.byteLength;
-          const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
           if (webSocket.readyState === WS_READY_STATE_OPEN) {
-            log(`doh success and dns message length is ${udpSize}`);
-            if (isVlessHeaderSent) {
-              webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+            if (protocolHeader) {
+              webSocket.send(await new Blob([protocolHeader, chunk]).arrayBuffer());
+              protocolHeader = null;
             } else {
-              webSocket.send(await new Blob([responseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-              isVlessHeaderSent = true;
+              webSocket.send(chunk);
             }
           }
         },
+        close() {
+          log(`UDP connection to ${targetAddress} closed`);
+        },
+        abort(reason) {
+          console.error(`UDP connection to ${targetPort} aborted due to ${reason}`);
+        },
       })
-    )
-    .catch((error) => {
-      log("dns udp has error" + error);
-    });
-
-  const writer = transformStream.writable.getWriter();
-
-  return {
-    write(chunk) {
-      writer.write(chunk);
-    },
-  };
+    );
+  } catch (e) {
+    console.error(`Error while handling UDP outbound, error ${e.message}`);
+  }
 }
 
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
@@ -761,10 +894,8 @@ function safeCloseWebSocket(socket) {
   }
 }
 
-async function checkProxyHealth(proxyIP, proxyPort, tls) {
-  const req = await fetch(
-    `${PROXY_HEALTH_CHECK_API}?ip=${proxyIP}&port=${proxyPort}&host=speed.cloudflare.com&tls=${tls}`
-  );
+async function checkProxyHealth(proxyIP, proxyPort) {
+  const req = await fetch(`${PROXY_HEALTH_CHECK_API}?ip=${proxyIP}:${proxyPort}`);
   return await req.json();
 }
 
@@ -785,6 +916,20 @@ function base64ToArrayBuffer(base64Str) {
 
 function arrayBufferToHex(buffer) {
   return [...new Uint8Array(buffer)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+function shuffleArray(array) {
+  let currentIndex = array.length;
+
+  // While there remain elements to shuffle...
+  while (currentIndex != 0) {
+    // Pick a remaining element...
+    let randomIndex = Math.floor(Math.random() * currentIndex);
+    currentIndex--;
+
+    // And swap it with the current element.
+    [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+  }
 }
 
 async function generateHashFromText(text) {
@@ -844,6 +989,13 @@ class CloudflareApi {
     if (!domain.endsWith(rootDomain)) return 400;
     if (registeredDomains.includes(domain)) return 409;
 
+    try {
+      const domainTest = await fetch(`https://${domain.replaceAll("." + APP_DOMAIN, "")}`);
+      if (domainTest.status == 530) return 530;
+    } catch (e) {
+      return 400;
+    }
+
     const url = `https://api.cloudflare.com/client/v4/accounts/${this.accountID}/workers/domains`;
     const res = await fetch(url, {
       method: "PUT",
@@ -868,1202 +1020,469 @@ class CloudflareApi {
  * Tapi, karena kelihatannta repot kalo pake HTML Rewriter. Kita pake cara konfensional saja...
  */
 let baseHTML = `
-  
 <!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FREE | CF | LIFETIME | BMKG.XYZ</title>
-    <meta name="description" content="FREE | CF | LIFETIME | BMKG.XYZ">
-    <meta name="keywords" content="FREE | CF | LIFETIME | BMKG.XYZ">
-    <meta name="author" content="FREE | CF | LIFETIME | BMKG.XYZ">
-    <meta name="robots" content="FREE | CF | LIFETIME | BMKG.XYZ">
-
-    <!-- Open Graph Meta Tags untuk SEO Media Sosial -->
-    <meta property="og:title" content="FREE | CF | LIFETIME | BMKG.XYZ">
-    <meta property="og:description" content="FREE | CF | LIFETIME | BMKG.XYZ">
-    <meta property="og:image" content="https://png.pngtree.com/background/20231016/original/pngtree-high-definition-3d-wallpaper-in-black-and-red-picture-image_5583707.jpg"> <!-- Ganti dengan URL gambar yang sesuai -->
-    <meta property="og:url" content="https://png.pngtree.com/background/20231016/original/pngtree-high-definition-3d-wallpaper-in-black-and-red-picture-image_5583707.jpg">
-    <meta property="og:type" content="website">
-
-    <!-- Twitter Card Meta Tags -->
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="FREE | CF | LIFETIME | BMKG.XYZ">
-    <meta name="twitter:description" content="FREE | CF | LIFETIME | BMKG.XYZ">
-    <meta name="twitter:image" content="https://png.pngtree.com/background/20231016/original/pngtree-high-definition-3d-wallpaper-in-black-and-red-picture-image_5583707.jpg"> <!-- Ganti dengan URL gambar yang sesuai -->
-    <link href="https://png.pngtree.com/background/20231016/original/pngtree-high-definition-3d-wallpaper-in-black-and-red-picture-image_5583707.jpg" rel="icon" type="image/png">
-    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flag-icon-css/css/flag-icon.min.css">
-
-  <style>
- 
-    
-
-
-
-
-#link-sub {
-    border: 2px solid #007bff; /* Warna biru */
-    border-radius: 5px; /* Opsional: Membuat sudut melengkung */
-    padding: 10px; /* Opsional: Memberi jarak dalam input */
-    background-color: #f9f9f9; /* Opsional: Warna latar belakang */
-    color: #333; /* Opsional: Warna teks */
-    width: 100%; /* Opsional: Menyesuaikan lebar */
-    box-sizing: border-box; /* Opsional: Memastikan padding tidak menambah ukuran total */
-}
-
-#link-sub:focus {
-    border-color: #0056b3; /* Warna saat input terfokus */
-    outline: none; /* Menghapus garis luar bawaan browser */
-}
-
-body {
-      background-color: #000; /* Hitam pekat (dark mode) */
-      color: #4CAF50; /* Teks hijau agar kontras dengan background */
-      margin: 0;
-      font-family: Arial, sans-serif; /* Font sederhana dan bersih */
-    }
-.flag-icon {
-    position: relative; /* Pastikan posisinya tidak fixed atau absolute */
-    z-index: 1; /* Memberi prioritas lebih rendah daripada header */
-}
-    h1 {
-      color: black;
-            text-align: center;
-            font-size: 8vw;
-            font-weight: bold;
-            text-shadow: 
-                0 0 5px rgba(0, 123, 255, 0.8),
-                0 0 10px rgba(0, 123, 255, 0.8),
-                0 0 20px rgba(0, 123, 255, 0.8),
-                0 0 30px rgba(0, 123, 255, 0.8),
-                0 0 40px rgba(0, 123, 255, 0.8);
-    }
-    h2 {
-      color: black;
-            text-align: center;
-            font-size: 4vw;
-            font-weight: bold;
-            text-shadow: 
-                0 0 5px rgba(0, 123, 255, 0.8),
-                0 0 10px rgba(0, 123, 255, 0.8),
-                0 0 20px rgba(0, 123, 255, 0.8),
-                0 0 30px rgba(0, 123, 255, 0.8),
-                0 0 40px rgba(0, 123, 255, 0.8);
-    }
-    header, footer {
-      box-sizing: border-box; /* Pastikan padding dihitung dalam lebar elemen */
-      background-color: ;
-      color: white;
-      text-align: center;
-      border: 0px solid rgba(143, 0, 0, 0.89); /* Border dengan warna abu-abu */
-      border-radius: 10px;
-      padding: 0 20px;
-      position: fixed;
-      width: 100%;
-      left: 0;
-      right: 2px;
-      pointer-events: none;
-      z-index: 10;
-    }
-
-    header {
-      top: 0;
-    }
-
-    footer {
-      bottom: 0;
-    }
-   .service-selector {
-        width: 100%;
-        padding: 10px;
-        font-size: 16px;
-        border: 2px solid #4CAF50; /* Border warna hijau */
-        border-radius: 5px; /* Sudut membulat */
-        background-color: #f9f9f9; /* Warna latar belakang */
-        color: #333; /* Warna teks */
-        transition: background-color 0.3s, border-color 0.3s;
-    }
-
-    .service-selector:hover {
-        background-color: #e0f7fa; /* Warna latar belakang saat hover */
-        border-color: #00796b; /* Warna border saat hover */
-    }
-
-    .service-selector option {
-        padding: 10px;
-    }  
-    .container, .content {
-      
-      flex: 1;
-      padding-top: 80px; /* To avoid content being hidden under the header */
-      padding-bottom: 50px;
-      margin-top: 80px;
-      margin-bottom: 50px;/* To avoid content being hidden under the footer */
-      padding-left: 10px;
-      padding-right: 10px;
-      display: flex;
-      flex-direction: column;
-      max-width: 960px;
-      align-items: center;
-    /* overflow: hidden;*/
-    }
-.contentd {
-  padding: 60px 20px 40px; /* Memberikan ruang untuk header dan footer */
-  height: 100%;
-  overflow-y: auto;
-}
-    .filters {
-      display: flex;
-      justify-content: space-between;
-      width: 80%;
-      margin-bottom: 20px;
-    }
-.filters > div,
-.button {
-  margin-right: 20px;
-}
-    .filter-label {
-      margin-right: 10px;
-    }
-
-    /* Memberikan sudut melengkung pada tabel */
-    table {
-      
-      border-collapse: separate;
-      border-spacing: 0;
-      border: 0px solid rgba(26, 4, 83, 0.81); /* Warna border hijau */
-      border-radius: 10px; /* Sudut melengkung */
-      overflow: hidden;
-      width: 100%; /* Membuat tabel lebar penuh */
-    }
-
-    /* Membungkus tabel dalam elemen scroll */
-    .table-container {
-    width: 100%;
-    overflow-x: auto; /* Mengaktifkan scroll horizontal */
-    margin-bottom: 0px;
-    border: 1px solid rgba(143, 0, 0, 0.89); /* Border dengan warna abu-abu */
-    border-radius: 10px; /* Membuat sudut melengkung */
-    padding: 0px; /* Memberi jarak antara border dan konten */
-    background-color: ; /* Warna latar belakang */
-}
-
-
-thhhh {
-    background-color: rgba(26, 4, 83, 0.81); /* Warna latar belakang */
-    color: white; /* Warna teks putih */
-    font-weight: bold;
-    padding: 10px;
-    text-align: center;
-    position: sticky; /* Menempelkan elemen saat digulir */
-    top: 0; /* Menempel di bagian atas tabel */
-    z-index: 1; /* Memberikan prioritas tampilan lebih tinggi */
-    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1); /* Bayangan untuk efek */
-}
-    th {
-      background-color: rgba(26, 4, 83, 0.81); /* Warna hijau */
-      color: white; /* Warna teks putih */
-      font-weight: bold;
-      padding: 10px;
-      text-align: center;
-    }
-    #total-proxy {
-      margin: 20px 0; /* 20px atas dan bawah, 0px kiri dan kanan */
-      text-align: center;
-    }
-    td {
-      padding: 10px;
-      text-align: center;
-      background-color: rgba(26, 4, 83, 0.81); /* Warna hijau transparan */
-      color: #fff; /* Warna teks */
-      border-bottom: 1px solid #ddd; /* Garis pembatas antar baris */
-      transition: background-color 0.3s ease; /* Efek transisi */
-    }
-
-    td:hover {
-      background-color: rgba(0, 19, 46, 0.86); /* Warna hijau lebih gelap saat dihover */
-    }
-
-    tr:nth-child(odd) td {
-      background-color: rgba(0, 45, 70, 0.81); /* Warna abu terang */
-    }
-
-    tr:hover td {
-      background-color: rgba(0, 0, 0, 0.38); /* Warna latar biru muda saat baris dihover */
-      color: #fff; /* Warna teks saat dihover */
-    }
-
-    .copy-vless, .cekproxy, .copy-vless1, .copy-trojan, .copy-ss {
-      margin: 5px;
-      padding: 5px 10px;
-      border: 1px solid rgba(197, 51, 6, 0.89); /* Border dengan warna abu-abu */
-      border-radius: 10px;
-      background-color: #007bff;
-      color: #fff;
-      cursor: pointer;
-    }
-
-    .copy-vless:hover, .cekproxy:hover, .copy-vless1:hover, .copy-trojan:hover, .copy-ss:hover {
-      background-color: #0069d9;
-    }
-
-    .copy-vless-clash, .copy-vless2, .copy-trojan-clash, .copy-ss1 {
-      margin: 5px;
-      padding: 5px 10px;
-      border: 1px solid rgba(197, 51, 6, 0.89); /* Border dengan warna abu-abu */
-      border-radius: 10px;
-      background-color: #4CAF50;
-      color: #fff;
-      cursor: pointer;
-    }
-
-    .copy-vless-clash:hover, .copy-vless2:hover, .copy-trojan-clash:hover, .copy-ss1:hover {
-      background-color: #4CAF50;
-    }
-
-    .pagination {
-      text-align: center;
-    }
-
-    .pagination button {
-      margin: 5px;
-      padding: 12px 12px;
-      border: 1px solid rgba(197, 51, 6, 0.89); /* Border dengan warna abu-abu */
-      border-radius: 10px;
-      background-color: rgba(0, 3, 63, 0.84);
-      color: #fff;
-      cursor: pointer;
-    }
-
-    .pagination button:hover {
-      background-color: rgba(50, 0, 63, 0.84);
-    }
-
-    .pagination .active {
-      background-color: rgba(0, 15, 123, 0.78);
-    }
-
-    #search-bar, #items-per-page {
-      padding: 10px;
-      width: 150px;
-      max-width: 100px;
-      border: 2px solid #4CAF50;
-      border-radius: 5px; 
-    }
-
-    /* Responsif */
-    @media (max-width: 100%) {
-      header, footer {
-        padding: 0%;
+<html lang="en" id="html" class="scroll-auto scrollbar-hide dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Proxy List</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* For Webkit-based browsers (Chrome, Safari and Opera) */
+      .scrollbar-hide::-webkit-scrollbar {
+          display: none;
       }
 
-      table {
-        width: 100%;
-        margin-bottom: 10px;
+      /* For IE, Edge and Firefox */
+      .scrollbar-hide {
+          -ms-overflow-style: none;  /* IE and Edge */
+          scrollbar-width: none;  /* Firefox */
       }
-
-      #search-bar, #items-per-page {
-        width: 60px;
-        max-width: none;
-        margin-bottom: 10px;
-        border-radius: 5px; 
-      }
-
-      .pagination button {
-        padding: 12px;
-        font-size: 18px;
-      }
-
-      .copy-vless, .copy-vless1, .copy-trojan, .copy-ss {
-        padding: 4px 8px;
-        border: 1px solid rgba(197, 51, 6, 0.89); /* Border dengan warna abu-abu */
-        border-radius: 10px;
-        font-size: 12px;
-      }
-    }
-     
-    
-                .popup {
-      display: none; /* Hidden by default */
-      position: fixed;
-      left: 0;
-      top: 0;
-      width: 100%;
-      height: 100%;
-      border: 0px solid rgba(197, 51, 6, 0.89); /* Border dengan warna abu-abu */
-      border-radius: 10px;
-      background-color: rgba(0, 0, 0, 0.5);
-      justify-content: center;
-      align-items: center;
-      z-index: 100;
-    }
-  .button {
-      margin: 10px;
-      padding: 10px 10px;
-      border: 1px solid rgba(197, 51, 6, 0.89); /* Border dengan warna abu-abu */
-      border-radius: 10px;
-      border-radius: 5px;
-      background-color: rgba(255, 0, 0, 0.86);
-      color: #fff;
-      cursor: pointer;
-    }
-    
-    .popup-content {
-      background-color: rgba(0, 3, 63, 0.84);
-      padding: 20px;
-      border: 1px solid rgba(197, 51, 6, 0.89); /* Border dengan warna abu-abu */
-      border-radius: 10px;
-      text-align: center;
-      z-index: 101;
-    }
-    .popup button {
-      margin: 10px;
-      padding: 10px 10px;
-      border: 1px solid rgba(197, 51, 6, 0.89); 
-      border-radius: 5px;
-      background-color: rgba(255, 0, 0, 0.86);
-      color: #fff;
-      cursor: pointer;
-      
-    }
-    .button1 {
-      padding: 10px;
-      background-color: rgba(255, 0, 0, 0.86);
-      color: white;
-      border: none;
-      cursor: pointer;
-      
-    }
-    .popup button:hover {
-      background-color: rgba(255, 108, 0, 0.86);
-    }
-.highlight-text {
-    color: #007bff; /* Warna biru */
-    font-size: 18px; /* Ukuran teks */
-}
-  </style>
-</head>
-<body>
-  <header>
-  <h1>FREE PROXY CF BMKG.XYZ</h1>
-    </header>
-  <main class="content">
-    <center><button class="button" onclick="showPopup()">SHOW LINK SUB</button></center>
-
-    <div class="filters">
-      <div>
-        <span class="filter-label">Item Page:</span>
-        <select id="items-per-page">
-          <option value="10">10 Baris</option>
-          <option value="25">25 Baris</option>
-          <option value="50">50 Baris</option>
-          <option value="100">100 Baris</option>
-        </select>
-      </div>
-      <div>
-        <span class="filter-label">Search:</span>
-        <input type="text" id="search-bar" placeholder="Cari Isp, Country Code">
-      </div></div>
-      <div class="table-container">
-    <table>
-      <thead>
-        <tr>          
-          <th>ISP | COUNTRY</th>
-          <th>Status</th>
-          <th>WILDCARD</th>
-          <th>Vless 443</th>
-          <th>Vless 80</th>
-          <th>Trojan</th>
-          <th>Shadowsock</th>
-        </tr>
-      </thead>
-      <tbody id="proxy-list"></tbody>  
-    </table>
-        </div>
-    <div class="total-proxy" id="total-proxy"></div>
-    <div class="pagination" id="pagination"></div>
-  </div> 
-<div class="popup" id="myPopup">
-<div class="popup-content">
-<div class="row"><hr/><span class="highlight-text">LINK SUB GENERATE</span><hr/>
-     <div class="col">
-      <label for="service-type">TYPE</label>
-      <select class="service-selector" id="service-type">
-        <option value="vless">VLESS</option>
-        <option value="trojan">TROJAN</option>
-        <option value="ss">SS</option>
-      </select>
-    </div>
-    <div class="col">
-      <label for="country-code">COUNTRY</label>
-      <select class="service-selector" id="country-code">
-     <option value="ID">Indonesia</option>
-    <option value="SG">Singapore</option>
-    <option value="US">United States</option>
-    <option value="AF">Afghanistan</option>
-    <option value="AL">Albania</option>
-    <option value="DZ">Algeria</option>
-    <option value="AS">American Samoa</option>
-    <option value="AD">Andorra</option>
-    <option value="AO">Angola</option>
-    <option value="AI">Anguilla</option>
-    <option value="AR">Argentina</option>
-    <option value="AM">Armenia</option>
-    <option value="AW">Aruba</option>
-    <option value="AU">Australia</option>
-    <option value="AT">Austria</option>
-    <option value="AZ">Azerbaijan</option>
-    <option value="BS">Bahamas</option>
-    <option value="BH">Bahrain</option>
-    <option value="BD">Bangladesh</option>
-    <option value="BB">Barbados</option>
-    <option value="BY">Belarus</option>
-    <option value="BE">Belgium</option>
-    <option value="BZ">Belize</option>
-    <option value="BJ">Benin</option>
-    <option value="BM">Bermuda</option>
-    <option value="BT">Bhutan</option>
-    <option value="BO">Bolivia</option>
-    <option value="BA">Bosnia and Herzegovina</option>
-    <option value="BW">Botswana</option>
-    <option value="BR">Brazil</option>
-    <option value="IO">British Indian Ocean Territory</option>
-    <option value="BN">Brunei Darussalam</option>
-    <option value="BG">Bulgaria</option>
-    <option value="BF">Burkina Faso</option>
-    <option value="BI">Burundi</option>
-    <option value="KH">Cambodia</option>
-    <option value="CM">Cameroon</option>
-    <option value="CA">Canada</option>
-    <option value="CV">Cape Verde</option>
-    <option value="KY">Cayman Islands</option>
-    <option value="CF">Central African Republic</option>
-    <option value="TD">Chad</option>
-    <option value="CL">Chile</option>
-    <option value="CN">China</option>
-    <option value="CX">Christmas Island</option>
-    <option value="CC">Cocos (Keeling) Islands</option>
-    <option value="CO">Colombia</option>
-    <option value="KM">Comoros</option>
-    <option value="CG">Congo</option>
-    <option value="CD">Congo (Democratic Republic)</option>
-    <option value="CK">Cook Islands</option>
-    <option value="CR">Costa Rica</option>
-    <option value="HR">Croatia</option>
-    <option value="CU">Cuba</option>
-    <option value="CY">Cyprus</option>
-    <option value="CZ">Czech Republic</option>
-    <option value="CI">Côte d'Ivoire</option>
-    <option value="DK">Denmark</option>
-    <option value="DJ">Djibouti</option>
-    <option value="DM">Dominica</option>
-    <option value="DO">Dominican Republic</option>
-    <option value="EC">Ecuador</option>
-    <option value="EG">Egypt</option>
-    <option value="SV">El Salvador</option>
-    <option value="GQ">Equatorial Guinea</option>
-    <option value="ER">Eritrea</option>
-    <option value="EE">Estonia</option>
-    <option value="ET">Ethiopia</option>
-    <option value="FK">Falkland Islands</option>
-    <option value="FO">Faroe Islands</option>
-    <option value="FJ">Fiji</option>
-    <option value="FI">Finland</option>
-    <option value="FR">France</option>
-    <option value="GF">French Guiana</option>
-    <option value="PF">French Polynesia</option>
-    <option value="TF">French Southern Territories</option>
-    <option value="GA">Gabon</option>
-    <option value="GM">Gambia</option>
-    <option value="GE">Georgia</option>
-    <option value="DE">Germany</option>
-    <option value="GH">Ghana</option>
-    <option value="GI">Gibraltar</option>
-    <option value="GR">Greece</option>
-    <option value="GL">Greenland</option>
-    <option value="GD">Grenada</option>
-    <option value="GP">Guadeloupe</option>
-    <option value="GU">Guam</option>
-    <option value="GT">Guatemala</option>
-    <option value="GG">Guernsey</option>
-    <option value="GN">Guinea</option>
-    <option value="GW">Guinea-Bissau</option>
-    <option value="GY">Guyana</option>
-    <option value="HT">Haiti</option>
-    <option value="HN">Honduras</option>
-    <option value="HK">Hong Kong</option>
-    <option value="HU">Hungary</option>
-    <option value="IS">Iceland</option>
-    <option value="IN">India</option>
-    <option value="ID">Indonesia</option>
-    <option value="IR">Iran</option>
-    <option value="IQ">Iraq</option>
-    <option value="IE">Ireland</option>
-    <option value="IL">Israel</option>
-    <option value="IT">Italy</option>
-    <option value="JM">Jamaica</option>
-    <option value="JP">Japan</option>
-    <option value="JE">Jersey</option>
-    <option value="JO">Jordan</option>
-    <option value="KZ">Kazakhstan</option>
-    <option value="KE">Kenya</option>
-    <option value="KI">Kiribati</option>
-    <option value="KW">Kuwait</option>
-    <option value="KG">Kyrgyzstan</option>
-    <option value="LA">Laos</option>
-    <option value="LV">Latvia</option>
-    <option value="LB">Lebanon</option>
-    <option value="LS">Lesotho</option>
-    <option value="LR">Liberia</option>
-    <option value="LY">Libya</option>
-    <option value="LI">Liechtenstein</option>
-    <option value="LT">Lithuania</option>
-    <option value="LU">Luxembourg</option>
-    <option value="MO">Macao</option>
-    <option value="MK">North Macedonia</option>
-    <option value="MG">Madagascar</option>
-    <option value="MW">Malawi</option>
-    <option value="MY">Malaysia</option>
-    <option value="MV">Maldives</option>
-    <option value="ML">Mali</option>
-    <option value="MT">Malta</option>
-    <option value="MH">Marshall Islands</option>
-    <option value="MQ">Martinique</option>
-    <option value="MR">Mauritania</option>
-    <option value="MU">Mauritius</option>
-    <option value="YT">Mayotte</option>
-    <option value="MX">Mexico</option>
-    <option value="FM">Micronesia</option>
-    <option value="MD">Moldova</option>
-    <option value="MC">Monaco</option>
-    <option value="MN">Mongolia</option>
-    <option value="ME">Montenegro</option>
-    <option value="MS">Montserrat</option>
-    <option value="MA">Morocco</option>
-    <option value="MZ">Mozambique</option>
-    <option value="MM">Myanmar</option>
-    <option value="NA">Namibia</option>
-    <option value="NR">Nauru</option>
-    <option value="NP">Nepal</option>
-    <option value="NL">Netherlands</option>
-    <option value="NC">New Caledonia</option>
-    <option value="NZ">New Zealand</option>
-    <option value="NI">Nicaragua</option>
-    <option value="NE">Niger</option>
-    <option value="NG">Nigeria</option>
-    <option value="NU">Niue</option>
-    <option value="NF">Norfolk Island</option>
-    <option value="KP">North Korea</option>
-    <option value="MP">Northern Mariana Islands</option>
-    <option value="NO">Norway</option>
-    <option value="OM">Oman</option>
-    <option value="PK">Pakistan</option>
-    <option value="PW">Palau</option>
-    <option value="PA">Panama</option>
-    <option value="PG">Papua New Guinea</option>
-    <option value="PY">Paraguay</option>
-    <option value="PE">Peru</option>
-    <option value="PH">Philippines</option>
-    <option value="PL">Poland</option>
-    <option value="PT">Portugal</option>
-    <option value="PR">Puerto Rico</option>
-    <option value="QA">Qatar</option>
-    <option value="RE">Réunion</option>
-    <option value="RO">Romania</option>
-    <option value="RU">Russia</option>
-    <option value="RW">Rwanda</option>
-    <option value="BL">Saint Barthélemy</option>
-    <option value="SH">Saint Helena</option>
-    <option value="KN">Saint Kitts and Nevis</option>
-    <option value="LC">Saint Lucia</option>
-    <option value="MF">Saint Martin</option>
-    <option value="PM">Saint Pierre and Miquelon</option>
-    <option value="VC">Saint Vincent and the Grenadines</option>
-    <option value="WS">Samoa</option>
-    <option value="SM">San Marino</option>
-    <option value="SA">Saudi Arabia</option>
-    <option value="SN">Senegal</option>
-    <option value="RS">Serbia</option>
-    <option value="SC">Seychelles</option>
-    <option value="SL">Sierra Leone</option>
-    <option value="SG">Singapore</option>
-    <option value="SX">Sint Maarten</option>
-    <option value="SK">Slovakia</option>
-    <option value="SI">Slovenia</option>
-    <option value="SB">Solomon Islands</option>
-    <option value="SO">Somalia</option>
-    <option value="ZA">South Africa</option>
-    <option value="KR">South Korea</option>
-    <option value="SS">South Sudan</option>
-    <option value="ES">Spain</option>
-    <option value="LK">Sri Lanka</option>
-    <option value="SD">Sudan</option>
-    <option value="SR">Suriname</option>
-    <option value="SJ">Svalbard and Jan Mayen</option>
-    <option value="SE">Sweden</option>
-    <option value="CH">Switzerland</option>
-    <option value="SY">Syria</option>
-    <option value="TW">Taiwan</option>
-    <option value="TJ">Tajikistan</option>
-    <option value="TZ">Tanzania</option>
-    <option value="TH">Thailand</option>
-    <option value="TL">Timor-Leste</option>
-    <option value="TG">Togo</option>
-    <option value="TK">Tokelau</option>
-    <option value="TO">Tonga</option>
-    <option value="TT">Trinidad and Tobago</option>
-    <option value="TN">Tunisia</option>
-    <option value="TR">Turkey</option>
-    <option value="TM">Turkmenistan</option>
-    <option value="TC">Turks and Caicos Islands</option>
-    <option value="TV">Tuvalu</option>
-    <option value="UG">Uganda</option>
-    <option value="UA">Ukraine</option>
-    <option value="AE">United Arab Emirates</option>
-    <option value="GB">United Kingdom</option>
-    <option value="US">United States</option>
-    <option value="UY">Uruguay</option>
-    <option value="UZ">Uzbekistan</option>
-    <option value="VU">Vanuatu</option>
-    <option value="VE">Venezuela</option>
-    <option value="VN">Vietnam</option>
-    <option value="WF">Wallis and Futuna</option>
-    <option value="EH">Western Sahara</option>
-    <option value="YE">Yemen</option>
-    <option value="ZM">Zambia</option>
-    <option value="ZW">Zimbabwe</option>
-</select>
-        </div>
-    <div class="col">
-      <label for="wildcard">WILDCARD</label>
-      <select class="service-selector" id="wildcard">
-        <option value="">NO WILDCARD</option>
-          <option value="ava.game.naver.com">ava.game.naver.com</option>
-          <option value="graph.instagram.com">graph.instagram.com</option>
-          <option value="quiz.int.vidio.com">quiz.int.vidio.com</option>
-          <option value="live.iflix.com">live.iflix.com</option>
-          <option value="support.zoom.us">support.zoom.us</option>
-          <option value="blog.webex.com">blog.webex.com</option>
-          <option value="investors.spotify.com">investors.spotify.com</option>
-          <option value="cache.netflix.com">cache.netflix.com</option>
-          <option value="zaintest.vuclip.com">zaintest.vuclip.com</option>
-          <option value="io.ruangguru.com">io.ruangguru.com</option>
-          <option value="api.midtrans.com">api.midtrans.com</option>
-        </select>
-      </div>
-    <div class="col">
-      <label for="cons">COUNT</label>
-      <select class="service-selector" id="cons">
-        <option value="5">5</option>
-        <option value="10">10</option>
-        <option value="25">25</option>
-        <option value="50">50</option>
-        <option value="100">100</option>
-        <option value="250">250</option>
-      </select>
-      </div>
-    <div class="col">
-      <label for="link-sub">SUB LINK</label>
-      <input type="text" id="link-sub" value="" readonly />
-      <button class="sub" onclick="copyLink()">COPY LINK</button>
-    <button onclick="hidePopup()">Close</button>
- 
-    </div>
-    </div>
-    </div>
-  </div>
-  <footer class="footer">
-    <h2><p>&copy; 2024 FREE PROXY CF BMKG.XYZ</p></h2>
-  </footer>
-<script>
-  // Function to generate the link
-  function generateLink() {
-    const serviceType = document.getElementById('service-type').value;
-    const countryCode = document.getElementById('country-code').value;
-    const wildcard = document.getElementById('wildcard').value;
-    const cons = document.getElementById('cons').value;
-
-    // Base URL for the link
-    let baseURL = `https://sub.bmkg.xyz/${serviceType}?sub1=${countryCode}&count=${cons}`;
-
-    // If wildcard is selected, append it to the URL
-    if (wildcard) {
-      baseURL += `&wildcard=${wildcard}`;
-    }
-
-    // Set the generated URL to the input field
-    document.getElementById('link-sub').value = baseURL;
-  }
-
-  // Add event listeners to the selects to trigger link generation
-  document.getElementById('service-type').addEventListener('change', generateLink);
-  document.getElementById('country-code').addEventListener('change', generateLink);
-  document.getElementById('wildcard').addEventListener('change', generateLink);
-  document.getElementById('cons').addEventListener('change', generateLink);
-
-  // Function to copy the link to clipboard
-  function copyLink() {
-    const inputField = document.getElementById('link-sub');
-    const link = inputField.value;
-
-    // Salin teks ke clipboard
-    navigator.clipboard.writeText(link).then(() => {
-      // Tampilkan pesan popup yang menarik menggunakan Swal
-      Swal.fire({
-        title: 'Berhasil!',
-        text: 'Link Sub telah berhasil disalin',
-        background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-        icon: 'success',
-        color: 'red', // Warna teks
-        customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6' // Warna tombol konfirmasi
-      });
-    }).catch((err) => {
-      // Tangani jika ada kesalahan saat menyalin
-      Swal.fire({
-        title: 'Gagal!',
-        text: 'Terjadi kesalahan saat menyalin link.',
-        icon: 'error',
-        background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (merah tua transparan)
-        color: 'red', // Warna teks
-        confirmButtonColor: '#d33' // Warna tombol konfirmasi
-      });
-    });
-  }
-
-  // Call generateLink initially to populate the field
-  generateLink();
-</script>
-
-  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-<script>
-    // Function to show the popup
-    function showPopup() {
-      document.getElementById("myPopup").style.display = "flex";
-    }
-
-    // Function to hide the popup
-    function hidePopup() {
-      document.getElementById("myPopup").style.display = "none";
-    }
-  </script>
+    </style>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/lozad/dist/lozad.min.js"></script>
     <script>
-let proxyPerPage = 15;
-let currentPage = 1;
-let filteredProxies = [];
-let allProxies = [];
-
-// Function to handle UUID generation
-function uuidv4() {
-  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
-    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
-  );
-}
-
-// Function to render proxies
-function renderProxies(proxies, proxyList, pagination) {
-  const start = (currentPage - 1) * proxyPerPage;
-  const end = start + proxyPerPage;
-  const currentPageProxies = proxies.slice(start, end);
-
-  proxyList.innerHTML = ''; // Clear previous list
-
-  currentPageProxies.forEach(proxy => {
-    const [ip, port, negara, penyedia] = proxy.split(",");
-    const uuid = uuidv4();
-    const row = document.createElement('tr');
-    row.innerHTML = `
-      <td> <span class="aha">${penyedia} | ${negara} </span><span class="flag-icon flag-icon-${negara.toLowerCase()}"></span>
-     </td>
-      <td><button class="cekproxy" onclick="checkProxyStatus('${ip}:${port}', this)">CHECK</button>          
-      <span class="latency-cell"></span></td>
-      <td>
-        <select class="service-selector">
-          <option value="">NO WILDCARD</option>
-          <option value="ava.game.naver.com">ava.game.naver.com</option>
-          <option value="graph.instagram.com">graph.instagram.com</option>
-          <option value="quiz.int.vidio.com">quiz.int.vidio.com</option>
-          <option value="live.iflix.com.com">live.iflix.com</option>
-          <option value="support.zoom.us">support.zoom.us</option>
-          <option value="blog.webex.com">blog.webex.com</option>
-          <option value="investors.spotify.com">investors.spotify.com</option>
-          <option value="cache.netflix.com">cache.netflix.com</option>
-          <option value="zaintest.vuclip.com">zaintest.vuclip.com</option>
-          <option value="io.ruangguru.com">io.ruangguru.com</option>
-          <option value="api.midtrans.com">api.midtrans.com</option>
-        </select>
-      </td>
-      <td><button class="copy-vless">COPY VLESS 443</button>
-      <button class="copy-vless-clash">COPY CLASH 443</button></td>
-      <td><button class="copy-vless1">COPY VLESS 80</button>
-      <button class="copy-vless2">COPY CLASH 80</button></td>
-      <td><button class="copy-trojan">COPY TROJAN 443</button>
-      <button class="copy-trojan-clash">COPY CLASH 443</button></td>
-      <td><button class="copy-ss">COPY SHADOWSOCK</button>
-      <button class="copy-ss1">COPY CLASH</button></td>
-    `;
-    proxyList.appendChild(row);
-
-    // Event listeners for copy buttons
-    
-    
-      
-    
-
-      
-    
-  row.querySelector('.copy-vless').addEventListener('click', () => {
-    const selectedService = row.querySelector('.service-selector').value || "tp1.bmkg.xyz";
-    const domain = selectedService === "tp1.bmkg.xyz" ? "tp1.bmkg.xyz" : `${selectedService}.tp1.bmkg.xyz`;
-    const VLESS = `vless://${uuid}@${selectedService}:443?encryption=none&type=ws&host=${domain}&path=%2F${ip}-${port}&security=tls&sni=${domain}#(${selectedService})+${negara}+${penyedia}`;
-    navigator.clipboard.writeText(VLESS);
-    Swal.fire({
-      title: 'Berhasil!',
-      text: 'COPY VLESS 443 SUKSES!',
-      icon: 'success',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6'
-    });
-  });
-
-  row.querySelector('.copy-vless-clash').addEventListener('click', () => {
-    const selectedService = row.querySelector('.service-selector').value || "tp1.bmkg.xyz";
-    const domain = selectedService === "tp1.bmkg.xyz" ? "tp1.bmkg.xyz" : `${selectedService}.tp1.bmkg.xyz`;
-    const VLESSC = `- name: (${selectedService})+${negara}+${penyedia}
-  server: ${selectedService}
-  port: 443
-  type: vless
-  uuid: ${uuid}
-  cipher: auto
-  tls: true
-  udp: true
-  skip-cert-verify: true
-  network: ws
-  servername: ${domain}
-  ws-opts:
-    path: /${ip}-${port}
-    headers:
-      Host: ${domain}`;
-    navigator.clipboard.writeText(VLESSC);
-    Swal.fire({
-      title: 'Berhasil!',
-      text: 'COPY VLESS CLASH 443 SUKSES!',
-      icon: 'success',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6'
-    });
-  });
-
-  row.querySelector('.copy-trojan').addEventListener('click', () => {
-    const selectedService = row.querySelector('.service-selector').value || "tp1.bmkg.xyz";
-    const domain = selectedService === "tp1.bmkg.xyz" ? "tp1.bmkg.xyz" : `${selectedService}.tp1.bmkg.xyz`;
-    const TROJAN = `trojan://${uuid}@${selectedService}:443?encryption=none&type=ws&host=${domain}&path=%2F${ip}-${port}&security=tls&sni=${domain}#(${selectedService})+${negara}+${penyedia}`;
-    navigator.clipboard.writeText(TROJAN);
-    Swal.fire({
-      title: 'Berhasil!',
-      text: 'COPY TROJAN SUKSES!',
-      icon: 'success',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6'
-    });
-  });
-
-  row.querySelector('.copy-trojan-clash').addEventListener('click', () => {
-    const selectedService = row.querySelector('.service-selector').value || "tp1.bmkg.xyz";
-    const domain = selectedService === "tp1.bmkg.xyz" ? "tp1.bmkg.xyz" : `${selectedService}.tp1.bmkg.xyz`;
-    const TROJANC = `- name: (${selectedService})+${negara}+${penyedia}
-    server: ${selectedService}
-    port: 443
-    type: trojan
-    password: ${uuid}
-    skip-cert-verify: true
-    sni: ${domain}
-    network: ws
-    ws-opts:
-      path: /${ip}-${port}
-      headers:
-        Host: ${domain}
-    udp: true `;
-    navigator.clipboard.writeText(TROJANC);
-    Swal.fire({
-      title: 'Berhasil!',
-      text: 'COPY TROJAN CLASH SUKSES!',
-      icon: 'success',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6'
-    });
-  });
-
-  row.querySelector('.copy-ss').addEventListener('click', () => {
-    const selectedService = row.querySelector('.service-selector').value || "tp1.bmkg.xyz";
-    const domain = selectedService === "tp1.bmkg.xyz" ? "tp1.bmkg.xyz" : `${selectedService}.tp1.bmkg.xyz`;
-    const SS = `ss://bm9uZTo1ZDJlYmQyYS05Y2I5LTRkMWItYWY1NS04NjE3ZDNlODFmMzk%3D@${selectedService}:443?encryption=none&type=ws&host=${domain}&path=%2F${ip}-${port}&security=tls&sni=${domain}#(${selectedService})+${negara}+${penyedia}`;
-    navigator.clipboard.writeText(SS);
-    Swal.fire({
-      title: 'Berhasil!',
-      text: 'COPY SHADOWSOCK SUKSES!',
-      icon: 'success',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6'
-    });
-  });
-
-  row.querySelector('.copy-ss1').addEventListener('click', () => {
-    const SS1 = `087861167414`;
-    navigator.clipboard.writeText(SS1);
-    Swal.fire({
-      title: 'Perhatian!',
-      text: 'SHADOWSOCK VERSI CLASH BELUM TERSEDIA',
-      icon: 'warning',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#f39c12'
-    });
-  });
-
-  row.querySelector('.copy-vless1').addEventListener('click', () => {
-    const VLESS1 = `vless://${uuid}@tp1.bmkg.xyz:80?encryption=none&type=ws&host=tp1.bmkg.xyz&path=%2F${ip}-${port}&security=none&sni=#(${selectedService})+${negara}+${penyedia}`;
-    navigator.clipboard.writeText(VLESS1);
-    Swal.fire({
-      title: 'Berhasil!',
-      text: 'COPY VLESS 80 SUKSES!',
-      icon: 'success',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6'
-    });
-  });
-
-  row.querySelector('.copy-vless2').addEventListener('click', () => {
-    const VLESS2 = `- name: (${selectedService})+${negara}+${penyedia}
-  server: tp1.bmkg.xyz
-  port: 80
-  type: vless
-  uuid: ${uuid}
-  cipher: auto
-  tls: false
-  skip-cert-verify: false
-  servername: tp1.bmkg.xyz
-  network: ws
-  ws-opts:
-    path: /${ip}-${port}
-    headers:
-      Host: tp1.bmkg.xyz
-  udp: true `;
-    navigator.clipboard.writeText(VLESS2);
-    Swal.fire({
-      title: 'Berhasil!',
-      text: 'COPY VLESS CLASH 80 SUKSES!',
-      icon: 'success',
-      background: 'rgba(6, 18, 67, 0.89)', // Warna latar belakang (biru pucat)
-      color: 'red', // Warna teks
-      customClass: {
-        popup: 'rounded-popup',
-      },
-      confirmButtonColor: '#3085d6'
-    });
-  });
-
-    
-  });
-
-  // Display total proxies
-  const totalProxies = proxies.length;
-  const totalProxyElement = document.getElementById('total-proxy');
-  if (totalProxyElement) {
-    totalProxyElement.textContent = `Total Proxies: ${totalProxies}`;
-  }
-
-  renderPagination(proxies, pagination);
-}
-
-// Function to render pagination
-// Function to render pagination
-function renderPagination(proxies, pagination) {
-  const totalPages = Math.ceil(proxies.length / proxyPerPage);
-  const maxButtons = 6;
-  pagination.innerHTML = '';
-
-  if (currentPage > 1) {
-    const firstButton = document.createElement('button');
-    firstButton.textContent = '<< First';
-    firstButton.addEventListener('click', () => updatePage(1, proxies, pagination));
-    pagination.appendChild(firstButton);
-
-    const prevButton = document.createElement('button');
-    prevButton.textContent = '<< Previous';
-    prevButton.addEventListener('click', () => updatePage(currentPage - 1, proxies, pagination));
-    pagination.appendChild(prevButton);
-  }
-
-  const startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2));
-  const endPage = Math.min(totalPages, startPage + maxButtons - 1);
-
-  for (let i = startPage; i <= endPage; i++) {
-    const pageButton = document.createElement('button');
-    pageButton.textContent = i;
-    if (i === currentPage) {
-      pageButton.classList.add('active');
-    }
-    pageButton.addEventListener('click', () => updatePage(i, proxies, pagination));
-    pagination.appendChild(pageButton);
-  }
-
-  if (currentPage < totalPages) {
-    const nextButton = document.createElement('button');
-    nextButton.textContent = 'Next >>';
-    nextButton.addEventListener('click', () => updatePage(currentPage + 1, proxies, pagination));
-    pagination.appendChild(nextButton);
-
-    const lastButton = document.createElement('button');
-    lastButton.textContent = 'Last >>';
-    lastButton.addEventListener('click', () => updatePage(totalPages, proxies, pagination));
-    pagination.appendChild(lastButton);
-  }
-}
-
-
-// Function to update page
-function updatePage(page, proxies, pagination) {
-  currentPage = page;
-  const proxyList = document.getElementById('proxy-list');
-  renderProxies(proxies, proxyList, pagination);
-}
-
-// Function to filter proxies
-function filterProxies(searchTerm) {
-  searchTerm = searchTerm.toLowerCase();
-  filteredProxies = allProxies.filter(proxy => proxy.toLowerCase().includes(searchTerm));
-  currentPage = 1;
-  const proxyList = document.getElementById('proxy-list');
-  const pagination = document.getElementById('pagination');
-  renderProxies(filteredProxies, proxyList, pagination);
-}
-
-// Event listener for search bar
-document.getElementById('search-bar').addEventListener('input', (e) => {
-  filterProxies(e.target.value);
-});
-
-// Event listener for items per page dropdown
-document.getElementById('items-per-page').addEventListener('change', (e) => {
-  proxyPerPage = parseInt(e.target.value);
-  const proxyList = document.getElementById('proxy-list');
-  const pagination = document.getElementById('pagination');
-  renderProxies(filteredProxies, proxyList, pagination);
-});
-
-// Fetching proxy data
-fetch("bot/proxy_list.txt")
-  .then(response => response.text())
-  .then(data => {
-    allProxies = data.split("\n").filter(line => line.trim() !== "");
-    filteredProxies = allProxies;
-    const proxyList = document.getElementById('proxy-list');
-    const pagination = document.getElementById('pagination');
-    renderProxies(filteredProxies, proxyList, pagination);
-  })
-  .catch(error => console.error("Error fetching proxy data:", error)); // Correct placement here
-
-// Check Proxy status function
-function checkProxyStatus(proxy, button) {
-  button.textContent = 'Loading';
-  button.style.backgroundColor = 'yellow'; // Set background color to yellow when loading
-  button.style.color = 'black'; // Set text color to black during loading
-  const latencyCell = button.parentElement.querySelector('.latency-cell'); // Find the latency span in the same cell
-
-  const startTime = performance.now();
-  fetch('https://httpbin.org/ip', {
-    method: 'GET',
-    headers: {
-      'Proxy': `http://${proxy}`,
-    },
-    timeout: 5000
-  })
-    .then(response => {
-      const endTime = performance.now();
-      const latency = (endTime - startTime).toFixed(2); // Calculate latency
-
-      if (response.ok) {
-        button.textContent = 'NGACENG';
-        button.style.backgroundColor = 'green'; // Set background color to green if the proxy is working
-        button.style.color = 'white'; // Set text color to white for active proxy
-        latencyCell.textContent = `${latency} ms`; // Display latency in the same column
-
-        // Display latency in a popup
-        Swal.fire({
-          title: 'Proxy Status: NGACENG',
-          text: `${latency} ms.`,
-          icon: 'success',
-          background: 'rgba(6, 18, 67, 0.89)', // Background color
-          color: 'white', // Text color
-          customClass: {
-            popup: 'rounded-popup',
-          },
-          confirmButtonColor: '#3085d6',
-        });
-      } else {
-        throw new Error('TURU');
+      tailwind.config = {
+        darkMode: 'selector',
       }
-    })
-    .catch(() => {
-      button.textContent = 'TURU';
-      button.style.backgroundColor = 'red'; // Set background color to red if the proxy failed
-      button.style.color = 'white'; // Set text color to white for failed proxy
-      latencyCell.textContent = ''; // Clear latency cell text on failure
+    </script>
+  </head>
+  <body class="bg-white dark:bg-neutral-800 bg-fixed">
+    <!-- Notification -->
+    <div
+      id="notification-badge"
+      class="fixed z-50 opacity-0 transition-opacity ease-in-out duration-300 mt-9 mr-6 right-0 p-3 max-w-sm bg-white rounded-xl border border-2 border-neutral-800 flex items-center gap-x-4"
+    >
+      <div class="shrink-0">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#171717" class="size-6">
+          <path
+            d="M5.85 3.5a.75.75 0 0 0-1.117-1 9.719 9.719 0 0 0-2.348 4.876.75.75 0 0 0 1.479.248A8.219 8.219 0 0 1 5.85 3.5ZM19.267 2.5a.75.75 0 1 0-1.118 1 8.22 8.22 0 0 1 1.987 4.124.75.75 0 0 0 1.48-.248A9.72 9.72 0 0 0 19.266 2.5Z"
+          />
+          <path
+            fill-rule="evenodd"
+            d="M12 2.25A6.75 6.75 0 0 0 5.25 9v.75a8.217 8.217 0 0 1-2.119 5.52.75.75 0 0 0 .298 1.206c1.544.57 3.16.99 4.831 1.243a3.75 3.75 0 1 0 7.48 0 24.583 24.583 0 0 0 4.83-1.244.75.75 0 0 0 .298-1.205 8.217 8.217 0 0 1-2.118-5.52V9A6.75 6.75 0 0 0 12 2.25ZM9.75 18c0-.034 0-.067.002-.1a25.05 25.05 0 0 0 4.496 0l.002.1a2.25 2.25 0 1 1-4.5 0Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </div>
+      <div>
+        <div class="text-md font-bold text-blue-500">Berhasil!</div>
+        <p class="text-sm text-neutral-800">Akun berhasil disalin</p>
+      </div>
+    </div>
+    <!-- Select Country -->
+    <div>
+      <div
+        class="h-full fixed top-0 w-14 bg-white dark:bg-neutral-800 border-r-2 border-neutral-800 dark:border-white z-20 overflow-y-scroll scrollbar-hide"
+      >
+        <div class="text-2xl flex flex-col items-center h-full gap-2">
+          PLACEHOLDER_BENDERA_NEGARA
+        </div>
+      </div>
+    </div>
+    <!-- Main -->
+    <div id="container-header">
+      <div id="container-info" class="bg-amber-400 border-2 border-neutral-800 text-right px-5">
+        <div class="flex justify-end gap-3 text-sm">
+          <p id="container-info-ip">IP: 127.0.0.1</p>
+          <p id="container-info-country">Country: Indonesia</p>
+          <p id="container-info-isp">ISP: Localhost</p>
+        </div>
+      </div>
+    </div>
+    <div class="container">
+      <div
+        id="container-title"
+        class="sticky bg-white dark:bg-neutral-800 border-b-2 border-neutral-800 dark:border-white z-10 py-6 w-screen"
+      >
+        <h1 class="text-xl text-center text-neutral-800 dark:text-white">
+          PLACEHOLDER_JUDUL
+        </h1>
+      </div>
+      <div class="flex gap-6 pt-10 w-screen justify-center">
+        PLACEHOLDER_PROXY_GROUP
+      </div>
 
-      // Display error in a popup
-      Swal.fire({
-        title: 'Proxy Status: TURU',
-        text: ``,
-        icon: 'error',
-        background: 'rgba(6, 18, 67, 0.89)', // Background color
-        color: 'white', // Text color
-        customClass: {
-          popup: 'rounded-popup',
-        },
-        confirmButtonColor: '#d33',
-      });
-    });
-}
+      <!-- Pagination -->
+      <nav id="container-pagination" class="w-screen mt-8 sticky bottom-0 right-0 left-0 transition -translate-y-6 z-20">
+        <ul class="flex justify-center space-x-4">
+          PLACEHOLDER_PAGE_BUTTON
+        </ul>
+      </nav>
+    </div>
+
+    <div id="container-window" class="hidden">
+      <!-- Windows -->
+      <!-- Informations -->
+      <div class="fixed z-20 top-0 w-full h-full bg-white dark:bg-neutral-800">
+        <p id="container-window-info" class="text-center w-full h-full top-1/4 absolute dark:text-white"></p>
+      </div>
+      <!-- Output Format -->
+      <div id="output-window" class="fixed z-20 top-0 right-0 w-full h-full flex justify-center items-center hidden">
+        <div class="w-[75%] h-[30%] flex flex-col gap-1 p-1 text-center rounded-md">
+          <div class="basis-1/6 w-full h-full rounded-md">
+            <div class="flex w-full h-full gap-1 justify-between">
+              <button
+                onclick="copyToClipboardAsTarget('clash')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                Clash
+              </button>
+              <button
+                onclick="copyToClipboardAsTarget('sfa')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                SFA
+              </button>
+              <button
+                onclick="copyToClipboardAsTarget('bfr')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                BFR
+              </button>
+            </div>
+          </div>
+          <div class="basis-1/6 w-full h-full rounded-md">
+            <div class="flex w-full h-full gap-1 justify-between">
+              <button
+                onclick="copyToClipboardAsTarget('v2ray')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                V2Ray/Xray
+              </button>
+              <button
+                onclick="copyToClipboardAsRaw()"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                Raw
+              </button>
+            </div>
+          </div>
+          <div class="basis-1/6 w-full h-full rounded-md">
+            <div class="flex w-full h-full gap-1 justify-center">
+              <button
+                onclick="toggleOutputWindow()"
+                class="basis-1/2 border-2 border-indigo-400 hover:bg-indigo-400 dark:text-white p-2 rounded-full flex justify-center items-center"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Wildcards -->
+      <div id="wildcards-window" class="fixed hidden z-20 top-0 right-0 w-full h-full flex justify-center items-center">
+        <div class="w-[75%] h-[30%] flex flex-col gap-1 p-1 text-center rounded-md">
+          <div class="basis-1/6 w-full h-full rounded-md">
+            <div class="flex w-full h-full gap-1 justify-between">
+              <input
+                id="new-domain-input"
+                type="text"
+                placeholder="Input wildcard"
+                class="basis-11/12 w-full h-full px-6 rounded-md focus:outline-0"
+              />
+              <button
+                onclick="registerDomain()"
+                class="p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-6">
+                  <path
+                    fill-rule="evenodd"
+                    d="M16.72 7.72a.75.75 0 0 1 1.06 0l3.75 3.75a.75.75 0 0 1 0 1.06l-3.75 3.75a.75.75 0 1 1-1.06-1.06l2.47-2.47H3a.75.75 0 0 1 0-1.5h16.19l-2.47-2.47a.75.75 0 0 1 0-1.06Z"
+                    clip-rule="evenodd"
+                  ></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="basis-5/6 w-full h-full rounded-md">
+            <div
+              id="container-domains"
+              class="w-full h-full rounded-md flex flex-col gap-1 overflow-scroll scrollbar-hide"
+            ></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <div class="fixed bottom-3 right-3 flex flex-col gap-1 z-50">
+        <a href="${DONATE_LINK}" target="_blank">
+          <button class="bg-green-500 rounded-full border-2 border-neutral-800 p-1 block">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-6">
+              <path
+                d="M10.464 8.746c.227-.18.497-.311.786-.394v2.795a2.252 2.252 0 0 1-.786-.393c-.394-.313-.546-.681-.546-1.004 0-.323.152-.691.546-1.004ZM12.75 15.662v-2.824c.347.085.664.228.921.421.427.32.579.686.579.991 0 .305-.152.671-.579.991a2.534 2.534 0 0 1-.921.42Z"
+              />
+              <path
+                fill-rule="evenodd"
+                d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25ZM12.75 6a.75.75 0 0 0-1.5 0v.816a3.836 3.836 0 0 0-1.72.756c-.712.566-1.112 1.35-1.112 2.178 0 .829.4 1.612 1.113 2.178.502.4 1.102.647 1.719.756v2.978a2.536 2.536 0 0 1-.921-.421l-.879-.66a.75.75 0 0 0-.9 1.2l.879.66c.533.4 1.169.645 1.821.75V18a.75.75 0 0 0 1.5 0v-.81a4.124 4.124 0 0 0 1.821-.749c.745-.559 1.179-1.344 1.179-2.191 0-.847-.434-1.632-1.179-2.191a4.122 4.122 0 0 0-1.821-.75V8.354c.29.082.559.213.786.393l.415.33a.75.75 0 0 0 .933-1.175l-.415-.33a3.836 3.836 0 0 0-1.719-.755V6Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </a>
+        <button onclick="toggleWildcardsWindow()" class="bg-indigo-400 rounded-full border-2 border-neutral-800 p-1 PLACEHOLDER_API_READY">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke-width="1.5"
+            stroke="currentColor"
+            class="size-6"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M9 9V4.5M9 9H4.5M9 9 3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5 5.25 5.25"
+            />
+          </svg>
+        </button>
+        <button onclick="toggleDarkMode()" class="bg-amber-400 rounded-full border-2 border-neutral-800 p-1">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke-width="1.5"
+            stroke="currentColor"
+            class="size-6"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M12 3v2.25m6.364.386-1.591 1.591M21 12h-2.25m-.386 6.364-1.591-1.591M12 18.75V21m-4.773-4.227-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </footer>
+
+    <script>
+      // Shared
+      const rootDomain = "${serviceName}.${rootDomain}";
+      const notification = document.getElementById("notification-badge");
+      const windowContainer = document.getElementById("container-window");
+      const windowInfoContainer = document.getElementById("container-window-info");
+      const converterUrl =
+        "https://script.google.com/macros/s/AKfycbwwVeHNUlnP92syOP82p1dOk_-xwBgRIxkTjLhxxZ5UXicrGOEVNc5JaSOu0Bgsx_gG/exec";
 
 
+      // Switches
+      let isDomainListFetched = false;
 
-</script>
-  
-</body>
+      // Local variable
+      let rawConfig = "";
+
+      function getDomainList() {
+        if (isDomainListFetched) return;
+        isDomainListFetched = true;
+
+        windowInfoContainer.innerText = "Fetching data...";
+
+        const url = "https://" + rootDomain + "/api/v1/domains/get";
+        const res = fetch(url).then(async (res) => {
+          const domainListContainer = document.getElementById("container-domains");
+          domainListContainer.innerHTML = "";
+
+          if (res.status == 200) {
+            windowInfoContainer.innerText = "Done!";
+            const respJson = await res.json();
+            for (const domain of respJson) {
+              const domainElement = document.createElement("p");
+              domainElement.classList.add("w-full", "bg-amber-400", "rounded-md");
+              domainElement.innerText = domain;
+              domainListContainer.appendChild(domainElement);
+            }
+          } else {
+            windowInfoContainer.innerText = "Failed!";
+          }
+        });
+      }
+
+      function registerDomain() {
+        const domainInputElement = document.getElementById("new-domain-input");
+        const rawDomain = domainInputElement.value.toLowerCase();
+        const domain = domainInputElement.value + "." + rootDomain;
+
+        if (!rawDomain.match(/\\w+\\.\\w+$/) || rawDomain.endsWith(rootDomain)) {
+          windowInfoContainer.innerText = "Invalid URL!";
+          return;
+        }
+
+        windowInfoContainer.innerText = "Pushing request...";
+
+        const url = "https://" + rootDomain + "/api/v1/domains/put?domain=" + domain;
+        const res = fetch(url).then((res) => {
+          if (res.status == 200) {
+            windowInfoContainer.innerText = "Done!";
+            domainInputElement.value = "";
+            isDomainListFetched = false;
+            getDomainList();
+          } else {
+            if (res.status == 409) {
+              windowInfoContainer.innerText = "Domain exists!";
+            } else {
+              windowInfoContainer.innerText = "Error " + res.status;
+            }
+          }
+        });
+      }
+
+      function copyToClipboard(text) {
+        toggleOutputWindow();
+        rawConfig = text;
+      }
+
+      function copyToClipboardAsRaw() {
+        navigator.clipboard.writeText(rawConfig);
+
+        notification.classList.remove("opacity-0");
+        setTimeout(() => {
+          notification.classList.add("opacity-0");
+        }, 2000);
+      }
+
+      async function copyToClipboardAsTarget(target) {
+        windowInfoContainer.innerText = "Generating config...";
+        const url = converterUrl + "?target=" + target + "&url=" + encodeURIComponent(rawConfig);;
+        const res = await fetch(url, {
+          redirect: "follow",
+        });
+
+        if (res.status == 200) {
+          windowInfoContainer.innerText = "Done!";
+          navigator.clipboard.writeText(await res.text());
+
+          notification.classList.remove("opacity-0");
+          setTimeout(() => {
+            notification.classList.add("opacity-0");
+          }, 2000);
+        } else {
+          windowInfoContainer.innerText = "Error " + res.statusText;
+        }
+      }
+
+      function navigateTo(link) {
+        window.location.href = link + window.location.search;
+      }
+
+      function toggleOutputWindow() {
+        windowInfoContainer.innerText = "Select output:";
+        toggleWindow();
+        const rootElement = document.getElementById("output-window");
+        if (rootElement.classList.contains("hidden")) {
+          rootElement.classList.remove("hidden");
+        } else {
+          rootElement.classList.add("hidden");
+        }
+      }
+
+      function toggleWildcardsWindow() {
+        windowInfoContainer.innerText = "Domain list";
+        toggleWindow();
+        getDomainList();
+        const rootElement = document.getElementById("wildcards-window");
+        if (rootElement.classList.contains("hidden")) {
+          rootElement.classList.remove("hidden");
+        } else {
+          rootElement.classList.add("hidden");
+        }
+      }
+
+      function toggleWindow() {
+        if (windowContainer.classList.contains("hidden")) {
+          windowContainer.classList.remove("hidden");
+        } else {
+          windowContainer.classList.add("hidden");
+        }
+      }
+
+      function toggleDarkMode() {
+        const rootElement = document.getElementById("html");
+        if (rootElement.classList.contains("dark")) {
+          rootElement.classList.remove("dark");
+        } else {
+          rootElement.classList.add("dark");
+        }
+      }
+
+      function checkProxy() {
+        for (let i = 0; ; i++) {
+          const pingElement = document.getElementById("ping-"+i);
+          if (pingElement == undefined) return;
+
+          const target = pingElement.textContent.split(" ").filter((ipPort) => ipPort.match(":"))[0];
+          if (target) {
+            pingElement.textContent = "Checking...";
+          } else {
+            continue;
+          }
+
+          let isActive = false;
+          new Promise(async (resolve) => {
+            const res = await fetch("https://${serviceName}.${rootDomain}/check?target=" + target)
+              .then(async (res) => {
+                if (isActive) return;
+                if (res.status == 200) {
+                  pingElement.classList.remove("dark:text-white");
+                  const jsonResp = await res.json();
+                  if (jsonResp.proxyip === true) {
+                    isActive = true;
+                    pingElement.textContent = "Active " + jsonResp.delay + " ms";
+                    pingElement.classList.add("text-green-600");
+                  } else {
+                    pingElement.textContent = "Inactive";
+                    pingElement.classList.add("text-red-600");
+                  }
+                } else {
+                  pingElement.textContent = "Check Failed!";
+                }
+              })
+              .finally(() => {
+                resolve(0);
+              });
+          });
+        }
+      }
+
+      function checkGeoip() {
+        const containerIP = document.getElementById("container-info-ip");
+        const containerCountry = document.getElementById("container-info-country");
+        const containerISP = document.getElementById("container-info-isp");
+        const res = fetch("https://" + rootDomain + "/api/v1/myip").then(async (res) => {
+          if (res.status == 200) {
+            const respJson = await res.json();
+            containerIP.innerText = "IP: " + respJson.ip;
+            containerCountry.innerText = "Country: " + respJson.country;
+            containerISP.innerText = "ISP: " + respJson.asOrganization;
+          }
+        });
+      }
+
+      window.onload = () => {
+        checkGeoip();
+        checkProxy();
+
+        const observer = lozad(".lozad", {
+          load: function (el) {
+            el.classList.remove("scale-95");
+          },
+        });
+        observer.observe();
+      };
+
+      window.onscroll = () => {
+        const paginationContainer = document.getElementById("container-pagination");
+
+        if (window.innerHeight + Math.round(window.scrollY) >= document.body.offsetHeight) {
+          paginationContainer.classList.remove("-translate-y-6");
+        } else {
+          paginationContainer.classList.add("-translate-y-6");
+        }
+      };
+    </script>
+    </body>
+
 </html>
-
+`;
 
 class Document {
   proxies = [];
@@ -2098,7 +1517,7 @@ class Document {
 
       // Assign proxies
       proxyGroupElement += `<div class="lozad scale-95 mb-2 bg-white dark:bg-neutral-800 transition-transform duration-200 rounded-lg p-4 w-60 border-2 border-neutral-800">`;
-      proxyGroupElement += `  <div id="countryFlag" class="absolute -translate-y-10 -translate-x-2 border-2 border-neutral-800 rounded-md overflow-hidden scale-75"><img height="20" src="https://flagcdn.com/h40/${proxyData.country.toLowerCase()}.png" /></div>`;
+      proxyGroupElement += `  <div id="countryFlag" class="absolute -translate-y-9 -translate-x-2 border-2 border-neutral-800 rounded-full overflow-hidden"><img width="32" src="https://hatscripts.github.io/circle-flags/flags/${proxyData.country.toLowerCase()}.svg" /></div>`;
       proxyGroupElement += `  <div>`;
       proxyGroupElement += `    <div id="ping-${i}" class="animate-pulse text-xs font-semibold dark:text-white">Idle ${proxyData.proxyIP}:${proxyData.proxyPort}</div>`;
       proxyGroupElement += `  </div>`;
@@ -2143,7 +1562,7 @@ class Document {
     for (const flag of new Set(flagList)) {
       flagElement += `<a href="/sub?cc=${flag}${
         proxyBankUrl ? "&proxy-list=" + proxyBankUrl : ""
-      }" class="py-1" ><img width=20 src="https://flagcdn.com/h80/${flag.toLowerCase()}.png" /></a>`;
+      }" class="py-1" ><img width=20 src="https://hatscripts.github.io/circle-flags/flags/${flag.toLowerCase()}.svg" /></a>`;
     }
 
     this.html = this.html.replaceAll("PLACEHOLDER_BENDERA_NEGARA", flagElement);
@@ -2165,4 +1584,4 @@ class Document {
 
     return this.html.replaceAll(/PLACEHOLDER_\w+/gim, "");
   }
-}
+      }
